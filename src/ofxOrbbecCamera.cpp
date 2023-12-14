@@ -51,6 +51,10 @@ ofxOrbbecCamera::~ofxOrbbecCamera(){
 }
 
 void ofxOrbbecCamera::close(){
+    if (isThreadRunning()) {
+        stopThread();
+        waitForThread(true);
+    }
     clear();
 }
 
@@ -215,6 +219,8 @@ bool ofxOrbbecCamera::open(ofxOrbbec::Settings aSettings){
             }
 
             ob::Context::setLoggerSeverity(OB_LOG_SEVERITY_ERROR);
+            
+            startThread();
 
         }else{
             return false; 
@@ -233,43 +239,50 @@ bool ofxOrbbecCamera::isConnected(){
 }
 
 ofPixels ofxOrbbecCamera::getDepthPixels(){
+    ofScopedLock lock(depthPixelsMutex);
     return mDepthPixels;
 }
 
 ofFloatPixels ofxOrbbecCamera::getDepthPixelsF(){
+    ofScopedLock lock(depthPixelsMutex);
     return mDepthPixelsF;
-} 
+}
 
 ofPixels ofxOrbbecCamera::getColorPixels(){
+    ofScopedLock lock(colorPixelsMutex);
     return mColorPixels;
 }
 
 vector <glm::vec3> ofxOrbbecCamera::getPointCloud(){
+    ofScopedLock lock(pointCloudMutex);
     return mPointCloudPts;
 } 
 
 ofMesh ofxOrbbecCamera::getPointCloudMesh(){
+    ofScopedLock lock(pointCloudMutex);
     return mPointCloudMesh;
 }
 
-void ofxOrbbecCamera::update(){
-
+void ofxOrbbecCamera::update(ofEventArgs& args) {
     bNewFrameDepth = false;
-    bNewFrameColor = false; 
-    bNewFrameIR = false; 
+    bNewFrameColor = false;
+    bNewFrameIR = false;
+}
 
+void ofxOrbbecCamera::loop(){
     if( mPipe ){
-        //TODO: thread me 
-        auto frameSet = mPipe->waitForFrames(20);
+        auto frameSet = mPipe->waitForFrames(100);
         if(frameSet) {
             
             if( mCurrentSettings.bDepth ){
                 auto depthFrame = frameSet->getFrame(OB_FRAME_DEPTH);
                 if(depthFrame) {
+                    ofScopedLock lock(depthPixelsMutex);
                     mDepthPixels = processFrame(depthFrame);
 
                     if( mCurrentSettings.bPointCloud && !mCurrentSettings.bPointCloudRGB ){
                         try {
+                            ofScopedLock lock(pointCloudMutex);
                             std::shared_ptr<ob::Frame> frame = pointCloud->process(frameSet);
                             pointCloudToMesh(frame);
                         }
@@ -285,6 +298,7 @@ void ofxOrbbecCamera::update(){
             if( mCurrentSettings.bColor ){
                 auto colorFrame = frameSet->getFrame(OB_FRAME_COLOR);
                 if(colorFrame) {
+                    ofScopedLock lock(colorPixelsMutex);
                     mColorPixels = processFrame(colorFrame);
 
                     if( mCurrentSettings.bPointCloudRGB ){
@@ -292,6 +306,7 @@ void ofxOrbbecCamera::update(){
                             // point position value multiply depth value scale to convert uint to millimeter (for some devices, the default depth value uint is not
                             // millimeter)
                             auto depthValueScale = frameSet->depthFrame()->getValueScale();
+                            ofScopedLock lock(pointCloudMutex);
                             pointCloud->setPositionDataScaled(depthValueScale);
                             try {
                                 std::shared_ptr<ob::Frame> frame = pointCloud->process(frameSet);
@@ -312,7 +327,17 @@ void ofxOrbbecCamera::update(){
             }
 
         }
+    } else {
+        stopThread();
     }
+}
+
+void ofxOrbbecCamera::threadedFunction() {
+    ofAddListener(ofEvents().update, this, &ofxOrbbecCamera::update);
+    while (isThreadRunning()) {
+        loop();
+    }
+    ofRemoveListener(ofEvents().update, this, &ofxOrbbecCamera::update);
 }
         
 bool ofxOrbbecCamera::isFrameNew(){
@@ -533,7 +558,7 @@ void ofxOrbbecCamera::pointCloudToMesh(shared_ptr<ob::Frame> frame, bool bRGB){
             pointsSize = frame->dataSize() / sizeof(OBPoint);
         }
 
-        mPointCloudMesh = ofMesh();  
+        mPointCloudMesh = ofMesh();
         mPointCloudPts.clear();
         mPointCloudPts.reserve(pointsSize);
 
